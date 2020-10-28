@@ -29,8 +29,10 @@ class Agent(object):
                  clamp_out,
                  \
                  layer_sizes, active,
-                 grad_clip,
                  lr,
+                 \
+                 channels, kernels,
+                 strides, padding,
                  \
                  reg_weight,
                  \
@@ -44,11 +46,13 @@ class Agent(object):
         self.train_loader, self.test_loader = myDS.load_dataset( dataset_name, batch_size, n_workers )
 
         ## The VAE network itself
-        self.VAE = myNN.VAE_Network( name, net_dir, data_dims, latent_dims, condit_dims, layer_sizes, active, clamp_out )
+        self.VAE = myNN.VAE_Network( name, net_dir, data_dims, latent_dims,
+                                     condit_dims, layer_sizes, active, clamp_out,
+                                     channels, kernels, strides, padding )
 
         ## The optimiser and reconstruction loss function
         self.VAE_optimiser = optim.Adam( self.VAE.parameters(), lr=lr )
-        self.rec_loss_fn = nn.BCELoss( reduction="sum" )
+        self.rec_loss_fn = nn.MSELoss( reduction="sum" )
 
         ## Running history of the test and training losses per epoch, for graphing
         self.epochs_trained = 0
@@ -69,16 +73,16 @@ class Agent(object):
 
     def prepare_conditional(self, targets):
         """ This is used to modify the targets into conditional information,
-            particularly for one-hot encoding categorial varaibles (MNIST, CFIAR)
+            particularly for one-hot encoding categorial varaibles (MNIST, CIFAR)
             This function is called even if the no conditional information is used.
         """
         if self.condit_dims == 0:
             return None
 
-        condit_info = targets.to(self.VAE.device)
+        condit = targets.to(self.VAE.device)
         if self.targ_onehot:
-            condit_info = F.one_hot(condit_info, num_classes = self.condit_dims)
-        return condit_info
+            condit = F.one_hot(condit, num_classes = self.condit_dims)
+        return condit
 
     def prepare_data(self, data):
         """ This is used to modify the input data for the network,
@@ -92,6 +96,7 @@ class Agent(object):
     def train(self):
         """ This function performs one epoch of training on data provided by the train_loader
         """
+        self.VAE.train()
 
         tot_loss = 0
         for (data, targets) in tqdm(self.train_loader, desc="Training", ncols=60, unit=""):
@@ -99,27 +104,26 @@ class Agent(object):
             ## We zero out the gradients, as required for each pytorch train loop
             self.VAE_optimiser.zero_grad()
 
-            ## We prepare the data for our input (flatten, move to device, etc)
-            data = self.prepare_data(data)
-
-            ## We prepare the conditional information in our setup (if we need any)
-            condit_info = self.prepare_conditional(targets)
+            ## We prepare the input and conditional data (flatten, one-hot, move to device, etc)
+            data   = self.prepare_data(data)
+            condit = self.prepare_conditional(targets)
 
             ## We calculate the reconstructed output and latent stats of the VAE
-            reconstructions, means, log_stds = self.VAE(data, condit_info)
+            reconstructions, means, log_stds = self.VAE(data, condit)
 
             ## We calculate the total loss of the batch by combining the reconstruction error and the regulariation
             rec_loss = self.rec_loss_fn(reconstructions, data)
             kld_loss = - 0.5 * T.sum( 1 + 2*log_stds - means*means - (2*log_stds).exp() )
             loss = rec_loss + self.reg_weight * kld_loss
 
-            ## Perform the gradient descent step, clipping gradients if option is set
+            ## Perform the gradient descent step
             loss.backward()
-            if self.grad_clip > 0: nn.utils.clip_grad_norm_( self.VAE.parameters(), self.grad_clip )
             self.VAE_optimiser.step()
+
+            ## Update the running loss
             tot_loss += loss.item()
 
-        ## Update the epoch liss deque and the epoch counter
+        ## Update the epoch deque and the epoch counter
         self.trn_loss_hist.append( tot_loss / len(self.train_loader.dataset) )
         self.epochs_trained += 1
 
@@ -127,16 +131,21 @@ class Agent(object):
         """ This function performs one epoch of testing on data provided by the test_loader.
             It is basically the same as the train functin above but without the gradient desc
         """
+        self.VAE.eval()
         with T.no_grad():
             tot_loss = 0
             for (data, targets) in tqdm(self.test_loader, desc="Testing ", ncols=60, unit=""):
-                data = self.prepare_data(data)
-                condit_info = self.prepare_conditional(targets)
-                reconstructions, means, log_stds = self.VAE(data, condit_info)
+                data  = self.prepare_data(data)
+                condit = self.prepare_conditional(targets)
+
+                reconstructions, means, log_stds = self.VAE(data, condit)
+
                 rec_loss = self.rec_loss_fn(reconstructions, data)
                 kld_loss = - 0.5 * T.sum( 1 + 2*log_stds - means*means - (2*log_stds).exp() )
                 loss = rec_loss + self.reg_weight * kld_loss
+
                 tot_loss += loss.item()
+
         self.tst_loss_hist.append( tot_loss / len(self.test_loader.dataset) )
 
         ## Graphs and visualisations are based on the final batch in the test set

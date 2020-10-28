@@ -12,32 +12,34 @@ def main():
     ################ USER INPUT ################
 
     alg_name = "VAE"
-    dataset_name = "MNIST"
+    dataset_name = "CelebA"
 
     load_flag = None
 
     patience = 50
 
-    vis_z_space = 1
-    dim_reduction = "None" ## None, PCA or TSNE, the latter is much slower but can give better results
+    vis_z_space = 50
+    dim_reduction = "TSNE" ## None, PCA or TSNE, the latter is much slower but can give better results
 
     agent = Agent(
-                     name    = "MLP" + "_{}_{}".format(alg_name, dataset_name),
+                     name    = "CNN" + "_{}_{}".format(alg_name, dataset_name),
                      net_dir = "Saved_Models",
                      \
                      dataset_name = dataset_name,
-                     data_dims = [784], flatten_data = True,
-                     latent_dims = 2,
+                     data_dims = [3,32,32], flatten_data = False,
+                     latent_dims = 16,
                      condit_dims = 0, targ_onehot = True,
                      clamp_out = True,
                      \
-                     layer_sizes = [256,64,32], active = nn.ELU(),
-                     grad_clip = 40,
-                     lr = 1e-3,
+                     layer_sizes = [128], active = nn.ELU(),
+                     lr = 1e-4,
                      \
-                     reg_weight = 1,
+                     channels = [64,64,128,128], kernels = [4,4,4,4],
+                     strides = [2,2,2,2], padding = 1,
                      \
-                     batch_size = 1024, n_workers = 12,
+                     reg_weight = 0.1,
+                     \
+                     batch_size = 1024, n_workers = 6,
                  )
 
     ############################################
