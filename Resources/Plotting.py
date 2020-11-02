@@ -10,6 +10,25 @@ import matplotlib.pyplot as plt
 from MulticoreTSNE import MulticoreTSNE as TSNE
 from sklearn.decomposition import PCA
 
+class loss_contribution_plot(object):
+    def __init__(self, title = ""):
+
+        self.fig = plt.figure( figsize = (5,5) )
+        self.ax  = self.fig.add_subplot(111)
+        self.fig.suptitle(title)
+
+        self.loss_line, = self.ax.step( [], "-r", where="mid" )
+
+    def update(self, vals):
+
+        self.loss_line.set_data( np.arange(len(vals)), vals )
+
+        self.ax.relim()
+        self.ax.autoscale_view()
+
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
 class loss_plot(object):
     def __init__(self, title = ""):
 
@@ -36,7 +55,7 @@ class recreation_plot(object):
         self.trans = TV.transforms.ToPILImage()
         self.n = len(examples)
 
-        self.fig = plt.figure( figsize = (2*self.n,4) )
+        self.fig = plt.figure( figsize = (2.5*self.n,5) )
         self.fig.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
 
         self.ex_axes = [ self.fig.add_subplot(2,self.n,i) for i in range(1,self.n+1) ]

@@ -1,3 +1,7 @@
+import sys
+home_env = '../'
+sys.path.append(home_env)
+
 import torch as T
 import torchvision as TV
 from torch.utils.data import Dataset, DataLoader
@@ -9,11 +13,11 @@ def load_mnist_dataset( b_size, n_workers ):
 
     ## First we define the transforms which are simple converting to torch tensors
     ## This is to allow for extra rotations/crops/warps that we might want to add later
-    transform = TV.transforms.Compose([ TV.transforms.ToTensor() ])
+    transform = TV.transforms.Compose([ TV.transforms.ToTensor() ]) # TV.transforms.Normalize(0.1307, 0.3081) ])
 
     ## Now we load the train and test datasets
-    train_set = TV.datasets.MNIST( root='../Data', train=True,  download=True, transform=transform )
-    test_set  = TV.datasets.MNIST( root='../Data', train=False, download=True, transform=transform )
+    train_set = TV.datasets.MNIST( root='Data', train=True,  download=True, transform=transform )
+    test_set  = TV.datasets.MNIST( root='Data', train=False, download=True, transform=transform )
 
     ## Next we create the dataloaders
     train_loader = DataLoader(train_set, batch_size=b_size, num_workers=n_workers, pin_memory=True, shuffle=True )
@@ -30,8 +34,8 @@ def load_celeba_dataset( b_size, n_workers ):
     transform = TV.transforms.Compose([ TV.transforms.ToTensor() ])
 
     ## Now we load the train and test datasets
-    train_set = TV.datasets.CelebA( root='../Data', split="train",  download=True, transform=transform )
-    test_set  = TV.datasets.CelebA( root='../Data', split="test",   download=True, transform=transform )
+    train_set = TV.datasets.CelebA( root='Data', split="train",  download=True, transform=transform )
+    test_set  = TV.datasets.CelebA( root='Data', split="test",   download=True, transform=transform )
 
     ## Next we create the dataloaders
     train_loader = DataLoader(train_set, batch_size=b_size, num_workers=n_workers, pin_memory=True, shuffle=True )
@@ -48,8 +52,8 @@ def load_cifar_dataset( b_size, n_workers ):
     transform = TV.transforms.Compose([ TV.transforms.ToTensor() ])
 
     ## Now we load the train and test datasets
-    train_set = TV.datasets.CIFAR10( root='../Data', train=True,  download=True, transform=transform )
-    test_set  = TV.datasets.CIFAR10( root='../Data', train=False, download=True, transform=transform )
+    train_set = TV.datasets.CIFAR10( root='Data', train=True,  download=True, transform=transform )
+    test_set  = TV.datasets.CIFAR10( root='Data', train=False, download=True, transform=transform )
 
     ## Next we create the dataloaders
     train_loader = DataLoader(train_set, batch_size=b_size, num_workers=n_workers, pin_memory=True, shuffle=True )

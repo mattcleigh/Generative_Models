@@ -2,6 +2,8 @@ import sys
 home_env = '../'
 sys.path.append(home_env)
 
+from Resources import Utils as myUT
+
 import os
 import math
 import numpy as np
@@ -17,74 +19,63 @@ class VAE_Network(nn.Module):
         applied to both the encoder and decoder network.
     """
 
-    def __init__(self, name, chpt_dir,
-                       x_dims, z_dims, c_dims,
-                       layer_sizes, activ, clamp_out,
-                       channels, kernels, strides, padding ):
+    def __init__( self, name, net_dir, do_cnn,
+                  x_dims, z_dims, c_dims, clamp_out,
+                  act, mlp_layers, drpt, lnrm,
+                  cnn_layers, bnrm ):
         super(VAE_Network, self).__init__()
 
         ## Defining the network features
-        self.name      = name
-        self.chpt_dir  = chpt_dir
-        self.full_nm   = os.path.join(self.chpt_dir, self.name)
-        self.x_dims    = x_dims
-        self.z_dims    = z_dims
-        self.c_dims    = c_dims
-        self.clamp_out = clamp_out
-        self.resize    = None
+        self.__dict__.update(locals())
+        self.full_nm = os.path.join(self.net_dir, self.name)
+        self.resize = None
 
-        ## The convolutional channels need to include number of inputs
-        channels = [x_dims[0]] + channels
-
-        ## If the data has a sinle dimentions then we want to use a symmetric MLP
-        ## If the data dimensions indicates that we need a convolutional architecture then we prepare
-        ## A CNN encoder and a t-CNN decoder, the overall structure is still symmetric
-        if len(x_dims)==1:
-            self.conv_net = False
-            enc_ins  = x_dims[0]
-        else:
-            self.conv_net = True
-            enc_ins  = calc_cnn_out_dim( x_dims, channels, kernels, strides, padding )
+        ## We resize the mlp input/ouptut dimension to match the data or the cnn output
+        mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
         ## Defining the CNN and mlp encoder network
-        if self.conv_net: self.cnv_enc = cnn_creator( "cnv_enc", channels, kernels, strides, padding, activ )
-        self.mlp_enc = mlp_creator( "mlp_enc", n_in=enc_ins, n_out=2*z_dims, custom_size=layer_sizes, act_h=activ )
+        if self.do_cnn: self.cnv_enc = myUT.cnn_creator( "cnv_enc", x_dims[0], cnn_layers, act, bnrm )
+        self.mlp_enc = myUT.mlp_creator( "mlp_enc", n_in=mlp_dim+c_dims, n_out=2*z_dims, custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
 
         ## Reversing the layer structure so that the network is symmetrical
-        layer_sizes.reverse(), channels.reverse(), kernels.reverse(), strides.reverse()
+        mlp_layers.reverse(), cnn_layers.reverse()
 
-        ## Defining the MLP and CNN dencoder network
-        self.mlp_dec = mlp_creator( "mlp_dec", n_in=z_dims+c_dims, n_out=enc_ins, custom_size=layer_sizes, act_h=activ )
-        if self.conv_net: self.cnv_dec = cnn_creator( "cnv_dev", channels, kernels, strides, padding, activ, tpose=True )
+        ## Defining the MLP and t-CNN decoder network
+        self.mlp_dec = myUT.mlp_creator( "mlp_dec", n_in=z_dims+c_dims, n_out=mlp_dim, custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
+        if self.do_cnn: self.cnv_dec = myUT.cnn_creator( "cnv_dev", x_dims[0], cnn_layers, act, bnrm, tpose=True )
 
         ## Moving the network to the device
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
-        print("\n\nNetwork structure:")
+        print("\n\nNetwork structure: {}".format(self.name))
         print(self)
         print("\n")
 
-    def encode(self, data):
+    def encode(self, data, c_info=None):
         ## The information is passed through the encoding conv net if need be and then flattened
         ## We save the output size as it will be used to reshape the mlp output for the t-CNN
-        if self.conv_net:
+        if self.do_cnn:
             data = self.cnv_enc(data)
             if self.resize is None: self.resize = data.shape[1:]
             data = data.view(data.size(0), -1)
 
+        ## We may now add conditional information
+        if c_info is not None:
+            data = T.cat((data, c_info), 1)
+
         ## The information is propagated through the mlp endocer network
-        latent_stats = self.mlp_enc(data)
+        z_stats = self.mlp_enc(data)
 
         ## The output is split into the seperate means and (log) stds components
-        means, log_stds = T.chunk(latent_stats, 2, dim=-1)
+        z_means, z_log_stds = T.chunk(z_stats, 2, dim=-1)
 
         ## We sample the latent space based on these statistics
-        gaussian_dist = T.distributions.Normal( means, log_stds.exp() )
-        z = gaussian_dist.rsample()
+        gaussian_dist = T.distributions.Normal( z_means, z_log_stds.exp() )
+        z_samples = gaussian_dist.rsample()
 
         ## We return the latent space sample and the stats of the distribution
-        return z, means, log_stds
+        return z_samples, z_means, z_log_stds
 
     def decode(self, z, c_info=None):
         ## We add in our conditional information if specified
@@ -95,7 +86,7 @@ class VAE_Network(nn.Module):
         recon = self.mlp_dec(z)
 
         ## The information is unflattened and passed through the decoding conv net if specified
-        if self.conv_net:
+        if self.do_cnn:
             recon = recon.view(recon.size(0), *self.resize)
             recon = self.cnv_dec(recon)
 
@@ -106,9 +97,9 @@ class VAE_Network(nn.Module):
         return recon
 
     def forward(self, data, c_info=None):
-        latent_samples, latent_means, latent_stds = self.encode(data)
-        reconstruction = self.decode(latent_samples, c_info)
-        return reconstruction, latent_means, latent_stds
+        z_samples, z_means, z_log_stds = self.encode(data, c_info)
+        reconstruction = self.decode(z_samples, c_info)
+        return reconstruction, z_samples, z_means, z_log_stds
 
     def save_checkpoint(self, flag=""):
         T.save(self.state_dict(), self.full_nm+"_"+flag)
@@ -116,88 +107,74 @@ class VAE_Network(nn.Module):
     def load_checkpoint(self, flag=""):
         self.load_state_dict(T.load(self.full_nm+"_"+flag))
 
-def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
-                       act_h=nn.ReLU(), act_o=None, l_nrm=False,
-                       custom_size=None, return_list=False ):
-    """ A function used by many of the project algorithms to contruct a
-        simple and configurable MLP.
-        By default the function returns the full nn sequential model, but if
-        return_list is set to true then the output will still be in list form
-        to allow final layer configuration by the caller.
-        The custom_size argument is a list for creating streams with varying
-        layer width. If this is set then the width and depth parameters
-        will be ignored.
+class DIS_Network(nn.Module):
+    """ A discriminator neural network for a GAN setup.
     """
-    layers = []
-    widths = []
 
-    ## Generating an array to use as the widths
-    widths.append( n_in )
-    if custom_size is not None:
-        d = len( custom_size )
-        widths += custom_size
-    else:
-        widths += d*[w]
+    def __init__( self, name, net_dir, do_cnn,
+                  x_dims, c_dims,
+                  act, mlp_layers, drpt, lnrm,
+                  cnn_layers=[], brnm=False ):
+        super(DIS_Network, self).__init__()
 
-    ## Creating the "hidden" layers in the stream
-    for l in range(1, d+1):
-        layers.append(( "{}_lin_{}".format(name, l), nn.Linear(widths[l-1], widths[l]) ))
-        layers.append(( "{}_act_{}".format(name, l), act_h ))
-        if l_nrm:
-            layers.append(( "{}_nrm_{}".format(name, l), nn.LayerNorm(widths[l]) ))
+        ## Defining the network features
+        self.__dict__.update(locals())
+        self.full_nm = os.path.join(self.net_dir, self.name)
 
-    ## Creating the "output" layer of the stream if applicable which is sometimes
-    ## Not the case when creating base streams in larger arcitectures
-    if n_out is not None:
-        layers.append(( "{}_lin_out".format(name), nn.Linear(widths[-1], n_out) ))
-        if act_o is not None:
-            layers.append(( "{}_act_out".format(name), act_o ))
+        ## We resize the mlp input/ouptut dimension to match the data or the cnn output
+        mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
-    ## Return the list of features or...
-    if return_list:
-        return layers
+        ## Defining the network structure
+        if self.do_cnn: self.cnv_net = myUT.cnn_creator( "cnv_net", x_dims[0], cnn_layers, act, brnm )
+        self.mlp_net = myUT.mlp_creator( "mlp_net", n_in=mlp_dim+c_dims, n_out=1, custom_size=mlp_layers,
+                                         act_h=act, act_o=nn.Sigmoid(), drpt=drpt, lnrm=lnrm )
 
-    ## ... convert the list to an nn, then return
-    return nn.Sequential(OrderedDict(layers))
+        ## Moving the network to the device
+        self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
+        self.to(self.device)
 
+        print("\n\nNetwork structure: {}".format(self.name))
+        print(self)
+        print("\n")
 
-def cnn_creator( name, channels, kernels, strides, padding, act, tpose = False ):
+    def forward(self, input, c_info=None):
 
-    ## Calculate the depth of the network and check setting match
-    d = len(channels) - 1
-    assert( d == len(kernels) ), "Conv net specifications do not have equal length!"
+        ## The input is passed through the cnn and flattened
+        if self.do_cnn:
+            input = self.cnv_net(input)
+            input = input.view(input.size(0), -1)
 
-    ## The layer type
-    layer = nn.ConvTranspose2d if tpose else nn.Conv2d
+        ## We may now add conditional information
+        if c_info is not None:
+            input = T.cat((input, c_info), 1)
 
-    layers = []
-    for l in range(d):
-        ## We add the convulional layer
-        layers.append(( "{}_conv2d_{}".format(name, l+1),
-                        layer( in_channels=channels[l], out_channels=channels[l+1],
-                               kernel_size=kernels[l], stride=strides[l], padding=padding )
-                     ))
-        ## We do not add an activation function or batchnorm in the final layer of a transposed conv net
-        if not tpose or l != d-1:
-            layers.append(( "{}_lnrm_{}".format(name, l+1), nn.BatchNorm2d(num_features=channels[l+1]) ))
-            layers.append(( "{}_act_{}".format(name, l+1), act ))
+        ## The flattened tensor is then passed through the mlp
+        output = self.mlp_net(input)
 
-    return nn.Sequential(OrderedDict(layers))
+        return output
 
+    def save_checkpoint(self, flag=""):
+        T.save(self.state_dict(), self.full_nm+"_"+flag)
 
-def calc_cnn_out_dim( x_dims, channels, kernels, strides, padding ):
-    """ A function to return the exact number of outputs from a CNN
-    """
-    print("\nChecking Data-CNN-MLP Compatibility:")
-    n_in = x_dims[-1]
-    for k,s in zip(kernels, strides):
-        n_in = ( n_in + 2*padding - k ) / s + 1
-        print(" - ", n_in)
+    def load_checkpoint(self, flag=""):
+        self.load_state_dict(T.load(self.full_nm+"_"+flag))
 
-    assert( n_in.is_integer() ), "Incompatible layer/kernel sizes"
+class VAELoss(nn.Module):
+    def __init__(self, do_mse):
+        super(VAELoss, self).__init__()
 
-    ## Finnaly we square the output and multiply by the final channel number
-    ## This is because all channels are flattened into one array
-    n_out = int(n_in*n_in*channels[-1])
-    print(" - - dimension of CNN output = ", n_out)
-    return n_out
+        if do_mse:
+            self.rec_loss_fn = nn.MSELoss(reduction="mean")
+        else:
+            self.rec_loss_fn = nn.BCELoss(reduction="mean")
+
+    def forward(self, y_pred, y_true, means, log_stds):
+
+        ## Calculate the reconstruction error
+        rec_loss = self.rec_loss_fn( y_pred, y_true)
+
+        ## Calculate the KL Divergence loss
+        kld_div = - 0.5 * T.sum( 1 + 2*log_stds - means*means - (2*log_stds).exp() )
+
+        ## Combine and return
+        return rec_loss, kld_div
