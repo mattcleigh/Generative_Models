@@ -37,12 +37,12 @@ class loss_plot(object):
         self.fig.suptitle(title)
 
         self.trn_line, = self.ax.plot( [], "-r" )
-        self.tst_line, = self.ax.plot( [], "-k" )
+        self.tst_line, = self.ax.plot( [], "-g" )
 
     def update(self, trnl, tstl):
 
-        self.trn_line.set_data( np.arange(len(trnl)), trnl )
-        self.tst_line.set_data( np.arange(len(tstl)), tstl )
+        self.trn_line.set_data( np.arange(len(trnl)), np.clip(trnl,0,10) )
+        self.tst_line.set_data( np.arange(len(tstl)), np.clip(tstl,0,10) )
 
         self.ax.relim()
         self.ax.autoscale_view()
@@ -50,10 +50,25 @@ class loss_plot(object):
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
+def trans(tensor, unorm_trans=None, make_image=True):
+
+    if unorm_trans is not None:
+        tensor = unorm_trans(tensor)
+
+    tensor = T.clamp(tensor, 0, 1 )
+    
+    if make_image:
+        topil = TV.transforms.ToPILImage()
+        tensor = topil(tensor)
+
+    return tensor
+
+
 class recreation_plot(object):
-    def __init__(self, examples, title = ""):
-        self.trans = TV.transforms.ToPILImage()
+    def __init__(self, examples, title = "", unorm_trans=None):
+
         self.n = len(examples)
+        self.unorm_trans = unorm_trans
 
         self.fig = plt.figure( figsize = (2.5*self.n,5) )
         self.fig.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
@@ -65,16 +80,16 @@ class recreation_plot(object):
         for ax, exmpl in zip(self.ex_axes, examples):
             ax.get_xaxis().set_visible(False)
             ax.get_yaxis().set_visible(False)
-            ax.imshow( self.trans(exmpl) )
+            ax.imshow( trans(exmpl, unorm_trans) )
 
         for ax, exmpl in zip(self.ot_axes, examples):
             ax.get_xaxis().set_visible(False)
             ax.get_yaxis().set_visible(False)
-            self.update_imgs.append( ax.imshow( self.trans(exmpl) ) )
+            self.update_imgs.append( ax.imshow( trans(exmpl, unorm_trans) ) )
 
     def update(self, ex_outputs):
         for img, ex_out in zip(self.update_imgs, ex_outputs):
-            img.set_data(self.trans(ex_out))
+            img.set_data(trans(ex_out, self.unorm_trans))
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 

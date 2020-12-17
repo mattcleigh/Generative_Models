@@ -1,0 +1,103 @@
+import sys
+home_env = '../'
+sys.path.append(home_env)
+
+from Resources import Model
+from Resources import Utils as myUT
+from Resources import Plotting as myPL
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+import torch as T
+import torch.nn as nn
+import torchvision as TV
+import torch.nn.functional as F
+
+def to_img(x):
+    x = x.clamp(0, 1)
+    return x
+
+def show_image(img):
+    img = to_img(img)
+    npimg = img.numpy()
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+
+def main():
+
+    ## Initialise the model
+    model = Model.BIBAE_Agent( name = "VAE_GAN", save_dir = "Saved_Models" )
+
+    ## Load up the dataset
+    model.initiate_dataset( dataset_name = "Bro_Faces",
+                            data_dims = [3,90,90], flatten_data = False, clamped = False,
+                            class_dims = 10, class_onehot = True,
+                            n_workers = 2, batch_size = 43 )
+
+    ## Initialise the generative VAE
+    model.initiate_AE( variational = True, KLD_weight = 1e-2, cyclical = None,
+                       latent_dims = 2,    use_cond = False,
+                       act = nn.LeakyReLU(),
+                       mlp_layers = [256],
+                       cnn_layers = [ [64,3,1,0], ## C,K,S,P
+                                      [64,4,3,0],
+                                      [128,5,3,0],
+                                      [128,3,3,0],  ],
+                       drpt = 0.0, lnrm = False, bnrm = False )
+
+    ## Initialise the Latent Space Discriminator
+    # model.initiate_LSD( GRLambda = 1, weight = 1,
+    #                     act = nn.LeakyReLU(),
+    #                     mlp_layers = [64,64,64],
+    #                     drpt = 0.2, lnrm = False )
+
+    ## Initialise the IO Discriminator
+    model.initiate_IOD( GRLambda = 1, weight = 1, use_cond = False,
+                        act = nn.LeakyReLU(),
+                        mlp_layers = [64],
+                        cnn_layers = [ [32,6,2,0],
+                                       [32,4,3,0],
+                                       [32,5,3,0] ],
+                        drpt = 0.5, lnrm = False, bnrm = False )
+
+    ## Initialise the model
+    model.load_models( "latest" )
+
+    # load a network that was trained with a 2d latent space
+    if model.latent_dims != 2:
+        print('Please change the parameters to two latent dimensions.')
+
+    cond_info = 8 * T.ones( 100, dtype=T.int64, device=model.cluster.device)
+
+    with T.no_grad():
+
+        ## Giving the conditional information
+        if model.class_dims > 0:
+            cond_info = F.one_hot(cond_info, num_classes = model.class_dims)
+        else:
+            cond_info = None
+
+        # create a sample grid in 2d latent space
+        latent_x = np.linspace(-1.5,1.5,10)
+        latent_y = np.linspace(-1.5,1.5,10)
+        latents = T.zeros((len(latent_y), len(latent_x), 2))
+        for i, lx in enumerate(latent_x):
+            for j, ly in enumerate(latent_y):
+                latents[j, i, 0] = lx
+                latents[j, i, 1] = ly
+        latents = latents.view(-1, 2) # flatten grid into a batch
+
+        # reconstruct images from the latent vectors
+        latents = latents.to(model.cluster.device)
+        image_recon = model.cluster.AE_net.decode(latents, cond_info)
+        images = T.zeros(image_recon.shape)
+
+        for i, img in enumerate(image_recon):
+            images[i] = myPL.trans(img, unorm_trans=model.unorm_trans, make_image=False )
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        show_image(TV.utils.make_grid(images.data,10,5))
+        plt.show()
+
+if __name__ == '__main__':
+    main()

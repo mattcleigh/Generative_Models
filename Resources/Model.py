@@ -5,6 +5,7 @@ sys.path.append(home_env)
 from Resources import Networks as myNN
 from Resources import Datasets as myDS
 from Resources import Plotting as myPL
+from Resources import Utils    as myUT
 
 import os
 import numpy as np
@@ -20,287 +21,238 @@ from tqdm import tqdm
 from itertools import count
 from collections import OrderedDict, deque
 
-class BIB_AE(object):
+class BIBAE_Agent(object):
     def __init__(self, name, save_dir ):
 
-        self.name = name
-        self.save_dir = save_dir
+        self.name = os.path.join( save_dir, name )
+        self.cluster = myNN.BIBAE_Cluster( self.name+"_BIBAE" )
 
-    def setup_training(self, burn_in, disc_range ):
-        """ A function which sets up some variables used in training, including
-            the targeted range of discrinimator accuracies.
-            This function is required only for trianing.
-        """
-        self.epochs_trained = 0
-        self.burn_in   = burn_in
-        self.has_iodis = hasattr(self, "IODIS_Net")
-        self.has_lzdis = hasattr(self, "LZDIS_Net")
-        self.disc_max = max(disc_range)
-        self.disc_min = min(disc_range)
-        self.run_trn_loss = np.zeros(4)
-        self.run_trn_acc  = np.zeros(2)
-        self.run_tst_loss = np.zeros(4)
-        self.run_tst_acc  = np.zeros(2)
+        self.has_KLD    = False
+        self.has_LSD    = False
+        self.has_IOD    = False
+
+        self.train_LSD  = False
+        self.train_IOD  = False
+
+        self.KLD_weight = 0
+        self.LSD_weight = 0
+        self.IOD_weight = 0
+
+        self.AE_use_cond  = False
+        self.IOD_use_cond = False
+
+    def save_models(self, flag=""):
+        self.cluster.save_checkpoint(flag)
+
+    def load_models(self, flag=""):
+        self.cluster.load_checkpoint(flag)
 
     def initiate_dataset( self, dataset_name,
                           data_dims, flatten_data, clamped,
-                          target_dims, targ_onehot,
+                          class_dims, class_onehot,
                           n_workers, batch_size ):
         """ Calls the load_dataset method to give the cluster pytorch dataloaders
             for both the training and the test set, also loads some examples to use for plotting.
             This is required for the program to execute
         """
-        self.data_dims    = data_dims
-        self.flatten_data = flatten_data
-        self.clamped      = clamped
-        self.target_dims  = target_dims
-        self.targ_onehot  = targ_onehot
+        self.data_dims     = data_dims
+        self.flatten_data  = flatten_data
+        self.clamped       = clamped
+        self.class_dims    = class_dims
+        self.class_onehot  = class_onehot
 
         ## Update the name of the model to include the dataset it is working on
         self.name += "_" + dataset_name
 
         ## Getting the training and testing dataloaders
-        self.train_loader, self.test_loader = myDS.load_dataset( dataset_name, batch_size, n_workers )
+        self.train_loader, self.test_loader, self.unorm_trans = myDS.load_dataset( dataset_name, batch_size, n_workers )
 
         ## A list of examples to save for use in visualisation of the reconstruction and the latent space
-        idxes = np.random.randint(0,1000,4)
-        self.vis_data = T.stack([self.train_loader.dataset[i][0] for i in idxes ])
-        self.vis_targets = T.tensor([self.train_loader.dataset[i][1] for i in idxes ], dtype=T.int64)
-        self.latent_means = 0
-        self.latent_targets = 0
+        idxes = np.random.randint(0,len(self.train_loader.dataset),4)
+        self.vis_data    = T.stack( [self.train_loader.dataset[i][0] for i in idxes ])
+        self.vis_classes = T.tensor([self.train_loader.dataset[i][1] for i in idxes ], dtype=T.int64)
+        self.latent_classes = 0
 
         ## Checking if we will need a CNN structure for all later networks or if an MLP will be fine
         self.do_cnn = not( len(data_dims)==flatten_data==1 )
 
-    def initiate_VAE( self, do_mse, latent_dims, KLD_weight,
-                      lr, act,
-                      mlp_layers, drpt, lnrm,
-                      cnn_layers, bnrm ):
-        """ Give the cluster both a generator network, loss function, and optimiser.
-            This is required for the program to execute
+    def initiate_AE( self, variational, KLD_weight, cyclical,
+                     latent_dims, use_cond,
+                     act, mlp_layers, cnn_layers,
+                     drpt, lnrm, bnrm ):
+        """ This initialises the autoencoder
         """
 
+        ## The latent space dimension is needed throughout the training steps
+        self.has_KLD = variational
+        self.KLD_weight  = KLD_weight
+        self.cyclical    = cyclical
         self.latent_dims = latent_dims
-        self.KLD_weight = KLD_weight
+        self.AE_use_cond = use_cond
+        c_dims = self.class_dims if use_cond else 0
 
-        ## The VAE network
-        self.VAE_Net = myNN.VAE_Network( self.name+"_VAE", self.save_dir, self.do_cnn,
-                                         self.data_dims, self.latent_dims, self.target_dims, self.clamped,
-                                         act, mlp_layers, drpt, lnrm,
-                                         cnn_layers, bnrm )
+        ## Giving the cluster an autoencoding network
+        self.cluster.setup_AE( self.name+"_AE", variational, self.do_cnn,
+                               self.data_dims, self.latent_dims, c_dims, self.clamped,
+                               act, mlp_layers, cnn_layers,
+                               drpt, lnrm, bnrm )
 
-        ## The VAE reconstruction loss function and optimiser
-        self.VAErec_loss_fn = myNN.VAELoss(do_mse)
-        self.VAE_optimiser  = optim.Adam( self.VAE_Net.parameters(), lr=lr )
+        ## The AE reconstruction loss function and optimiser
+        self.AE_loss_fn = nn.MSELoss(reduction="mean")
 
-        ## Running history of the test and training VAE losses (wont include discriminator losses!)
-        self.VAE_trn_hist = deque( maxlen=100 )
-        self.VAE_tst_hist = deque( maxlen=100 )
+        ## Running history of the test and training AE losses
+        self.AE_trn_hist = deque( maxlen=100 )
+        self.AE_tst_hist = deque( maxlen=100 )
+        self.KLD_trn_hist = deque( maxlen=100 )
+        self.KLD_tst_hist = deque( maxlen=100 )
 
-    def initiate_IO_Disc( self, weight, lr, act,
-                          mlp_layers, drpt, lnrm,
-                          cnn_layers, bnrm ):
-        """ Give the cluster both an adversarial discriminator network for the input and output.
-            This is NOT required for the program to execute.
-        """
-        self.IODIS_weight = weight
-
-        ## The Discriminator network
-        self.IODIS_Net = myNN.DIS_Network(  self.name+"_IODIS", self.save_dir, self.do_cnn,
-                                            self.data_dims, self.target_dims,
-                                            act, mlp_layers, drpt, lnrm,
-                                            cnn_layers, bnrm )
-
-        ## The discriminator optimiser
-        self.IODIS_optimiser= optim.Adam( self.IODIS_Net.parameters(), lr=lr )
-
-        ## Running history of the test and training VAE losses (wont include discriminator losses!)
-        self.IODIS_trn_hist = deque( maxlen=100 )
-        self.IODIS_tst_hist = deque( maxlen=100 )
-
-    def initiate_LZ_Disc( self, weight, lr, act,
-                          mlp_layers, drpt, lnrm ):
+    def initiate_LSD( self, GRLambda, weight,
+                      act, mlp_layers, drpt, lnrm ):
         """ Give the cluster an adversarial network for the latent space.
         """
-        self.LZDIS_weight = weight
+
+        ## The discriminator contribution to the total loss function
+        self.has_LSD = True
+        self.train_LSD = False
+        self.LSD_weight = weight
 
         ## The Discriminator network
-        self.LZDIS_Net = myNN.DIS_Network( self.name+"_LZDIS", self.save_dir, False,
-                                           [self.latent_dims], 0,
-                                           act, mlp_layers, drpt, lnrm )
+        self.cluster.setup_LSD( GRLambda, self.name+"_LSD", False,
+                                [self.latent_dims], 0,
+                                act, mlp_layers, [], drpt, lnrm, False )
 
-        ## The discriminator  optimiser
-        self.LZDIS_optimiser= optim.Adam( self.LZDIS_Net.parameters(), lr=lr )
+        ## The discriminar reconstruction loss function and optimiser
+        self.LSD_loss_fn = nn.BCEWithLogitsLoss(reduction="mean")
 
-        ## Running history of the test and training VAE losses (wont include discriminator losses!)
-        self.LZDIS_trn_hist = deque( maxlen=100 )
-        self.LZDIS_tst_hist = deque( maxlen=100 )
+        ## Running history of the test and training LSD losses
+        self.LSD_trn_hist = deque( maxlen=100 )
+        self.LSD_tst_hist = deque( maxlen=100 )
 
-    def save_models(self, flag=""):
-        self.VAE_Net.save_checkpoint(flag)
-        if self.has_iodis: self.IODIS_Net.save_checkpoint(flag)
-        if self.has_lzdis: self.LZDIS_Net.save_checkpoint(flag)
+    def initiate_IOD( self, GRLambda, weight, use_cond,
+                      act, mlp_layers, cnn_layers,
+                      drpt, lnrm, bnrm ):
+        """ Give the cluster both an adversarial discriminator network for the input and output.
+        """
 
-    def load_models(self, flag=""):
-        self.VAE_Net.load_checkpoint(flag)
-        if self.has_iodis: self.IODIS_Net.load_checkpoint(flag)
-        if self.has_lzdis: self.LZDIS_Net.load_checkpoint(flag)
+        ## The discriminator contribution to the total loss function
+        self.has_IOD      = True
+        self.train_IOD    = False
+        self.IOD_weight   = weight
+        self.IOD_use_cond = use_cond
+        c_dims = self.class_dims if use_cond else 0
 
-    def prepare_conditional(self, targets):
-        """ This is used to modify the targets into conditional information,
+        ## Giving the cluster the IO discriminator network
+        self.cluster.setup_IOD( GRLambda, self.name+"_IOD", self.do_cnn,
+                                self.data_dims, c_dims,
+                                act, mlp_layers, cnn_layers,
+                                drpt, lnrm, bnrm )
+
+        ## The discriminar reconstruction loss function and optimiser
+        self.IOD_loss_fn = nn.BCEWithLogitsLoss(reduction="mean")
+
+        ## Running history of the test and training IOD losses
+        self.IOD_trn_hist = deque( maxlen=100 )
+        self.IOD_tst_hist = deque( maxlen=100 )
+
+    def setup_training(self, lr, burn_in, change_lr, clip_grad ):
+        """ A function which sets up some variables used in training, including
+            the targeted range of discrinimator accuracies.
+            This function is required only for trianing.
+        """
+        self.optimiser = optim.Adam( self.cluster.parameters(), lr=lr, betas=(0.5,0.99) )
+        self.change_lr = change_lr
+        self.burn_in = burn_in
+        self.clip_grad = clip_grad
+        self.epochs_trained = 0
+
+    def prepare_conditional(self, classes):
+        """ This is used to modify the classes into conditional information,
             particularly for one-hot encoding categorial varaibles (MNIST, CIFAR)
             This function is called even if the no conditional information is used.
         """
-        if self.target_dims == 0:
+
+        ## We check if conditional information is used by any of our networks
+        if self.AE_use_cond==self.IOD_use_cond==False:
             return None
 
-        cond_info = targets.to(self.VAE_Net.device)
-        if self.targ_onehot:
-            cond_info = F.one_hot(cond_info, num_classes = self.target_dims)
+        cond_info = classes.to(self.cluster.device)
+        if self.class_onehot:
+            cond_info = F.one_hot(cond_info, num_classes = self.class_dims)
         return cond_info
 
     def prepare_data(self, data):
         """ This is used to modify the input data for the network,
             particularly for flattening images when using an MLP
         """
-        data = data.to(self.VAE_Net.device)
+        data = data.to(self.cluster.device)
         if self.flatten_data:
             data = data.view( data.size(0), -1 )
         return data
 
-    def change_mode(self, mode):
-        if mode=="train":
-            self.VAE_Net.train()
-            if self.has_iodis: self.IODIS_Net.train()
-            if self.has_lzdis: self.LZDIS_Net.train()
-        else:
-            self.VAE_Net.eval()
-            if self.has_iodis: self.IODIS_Net.eval()
-            if self.has_lzdis: self.LZDIS_Net.eval()
+    def set_discrinimator_flags(self):
 
-    def vae_step( self, data, cond_info, train=True ):
+        ## We check if we have passed the burn in period
+        if self.epochs_trained == self.burn_in:
+            if self.has_LSD: self.train_LSD = True
+            if self.has_IOD: self.train_IOD = True
+            if self.change_lr is not None:
+                self.optimiser.param_groups[0]['lr'] = self.change_lr
 
-        if train:
-            self.VAE_optimiser.zero_grad()
-
-        reconstructions, z_samples, z_means, z_log_stds = self.VAE_Net(data, cond_info)
-        rec_loss, kld_loss = self.VAErec_loss_fn( reconstructions, data, z_means, z_log_stds )
-        kld_loss *= self.KLD_weight
-        loss = rec_loss + kld_loss
-        if train:
-            loss.backward()
-            self.VAE_optimiser.step()
-
-        return rec_loss.item(), kld_loss.item()
-
-    def iodis_step( self, data, cond_info, train=True ):
-
-        ## We train the discriminator on real and fake data
-        if train:
-            self.IODIS_optimiser.zero_grad()
-
-        recn, *_ = self.VAE_Net(data, cond_info)
-
-        real_outs = self.IODIS_Net( data, cond_info )
-        fake_outs = self.IODIS_Net( recn, cond_info )
-
-        ## We calculate the accuracy of the discrinimator
-        real_acc = T.round(real_outs).sum()
-        fake_acc = T.round(1-fake_outs).sum()
-        acc = (real_acc+fake_acc)/(2*len(data))
-
-        ## We only perform gradient descent if the accuracy isnt too high
-        if train and acc<=self.disc_max:
-            loss = ( - T.log(real_outs) - T.log(1-fake_outs) ).mean()
-            loss.backward()
-            self.IODIS_optimiser.step()
-
-        ## We now train the generator using fake data if the accuracy isnt too low
-        gloss = T.zeros(1)
-        if train and acc>=self.disc_min:
-            self.VAE_optimiser.zero_grad()
-            recn, *_ = self.VAE_Net(data, cond_info)
-            fake_outs = self.IODIS_Net( recn, cond_info )
-            gloss = -T.log(fake_outs).mean() * self.IODIS_weight
-            gloss.backward()
-            self.VAE_optimiser.step()
-
-        return acc.item(), gloss.item()
-
-    def lzdis_step( self, data, cond_info, train=True ):
-
-        if train:
-            self.LZDIS_optimiser.zero_grad()
-
-        _, z_samples, _, _ = self.VAE_Net(data, cond_info)
-        n_samples = T.normal( 0, 1, z_samples.shape ).to(self.LZDIS_Net.device)
-
-        n_outs = self.LZDIS_Net( n_samples, None )
-        z_outs = self.LZDIS_Net( z_samples, None )
-
-        n_acc = T.round(n_outs).sum()
-        z_acc = T.round(1-z_outs).sum()
-        acc = (n_acc+z_acc)/(2*len(data))
-
-        if train and acc<=self.disc_max:
-            loss = ( - T.log(n_outs) - T.log(1-z_outs) ).mean()
-            loss.backward()
-            self.LZDIS_optimiser.step()
-
-        gloss = T.zeros(1)
-        if train and acc>=self.disc_min:
-            self.VAE_optimiser.zero_grad()
-            _, z_samples, _, _ = self.VAE_Net(data, cond_info)
-            z_outs = self.LZDIS_Net( z_samples, None )
-            gloss = -T.log(z_outs).mean() * self.LZDIS_weight
-            gloss.backward()
-            self.VAE_optimiser.step()
-
-
-        return acc.item(), gloss.item()
 
     def training_epoch(self):
         """ This function performs one epoch of training on data provided by the train_loader
         """
-        ## Put all both networks into training mode
-        self.change_mode( "train" )
+        ## Put all networks into training mode
+        self.cluster.train()
 
-        ## We collect running losses/accuracies for each model
-        self.run_trn_loss = np.zeros(4)
-        self.run_trn_acc = np.zeros(2)
+        ## We collect running losses for each model
+        running_loss = np.zeros(4)
 
         ## Now we cycle through each minibatch
-        for (data, targets) in tqdm(self.train_loader, desc="Training", ncols=80, unit=""):
+        for (data, classes) in tqdm(self.train_loader, desc="Training", ncols=80, unit=""):
+
+            ## We zero out the gradients
+            self.optimiser.zero_grad()
 
             ## We prepare the input and conditional data (flatten, one-hot, move to device, etc)
             data = self.prepare_data(data)
-            cond_info = self.prepare_conditional(targets)
+            cond_info = self.prepare_conditional(classes)
 
-            ## We do the usual VAE training step, based on MSE or BCE from inputs to outputs
-            rec_loss, kld_loss = self.vae_step(data, cond_info)
-            self.run_trn_loss[0] += rec_loss
-            self.run_trn_loss[1] += kld_loss
+            ## We forward propagate the data through the entire cluster
+            (recons, z_values, z_means, z_log_stds,
+                     LSD_real, LSD_fake, IOD_real, IOD_fake) = self.cluster(data, cond_info, self.train_LSD, self.train_IOD)
 
-            ## If we are still in the burn in period, then we dont turn on discriminators
-            if self.epochs_trained<self.burn_in:
-                continue
+            ## Generate class labels for discriminators and placeholder loss
+            KLD_loss = T.tensor(0.0)
+            LSD_loss = T.tensor(0.0)
+            IOD_loss = T.tensor(0.0)
+            if (self.train_LSD or self.train_IOD):
+                ones  = T.ones(  [len(recons),1], dtype=T.float32, device=self.cluster.device)
+                zeros = T.zeros( [len(recons),1], dtype=T.float32, device=self.cluster.device)
 
-            ## We check if we have an IO discriminator
-            if self.has_iodis:
-                iod_acc, iod_loss = self.iodis_step(data, cond_info)
-                self.run_trn_loss[2] += iod_loss
-                self.run_trn_acc[0] += iod_acc
+            ## Now we calculate actual loss terms
+            AE_loss = self.AE_loss_fn( recons, data )
+            if self.has_KLD:   KLD_loss = 0.5 * T.mean( z_means*z_means + (2*z_log_stds).exp() - 2*z_log_stds - 1 )
+            if self.train_LSD: LSD_loss = 0.5 * ( self.LSD_loss_fn( LSD_real, ones) + self.LSD_loss_fn( LSD_fake, zeros) )
+            if self.train_IOD: IOD_loss = 0.5 * ( self.IOD_loss_fn( IOD_real, ones) + self.IOD_loss_fn( IOD_fake, zeros) )
 
-            ## We check if we have an LZ discriminator
-            if self.has_lzdis:
-                lzd_acc, lzd_loss = self.lzdis_step(data, cond_info)
-                self.run_trn_loss[3] += lzd_loss
-                self.run_trn_acc[1] += lzd_acc
+            ## The loss funcitons are combined for the whole network, and grad desc is performed
+            Total_loss = AE_loss + self.KLD_weight*KLD_loss + self.LSD_weight*LSD_loss + self.IOD_weight*IOD_loss
+            Total_loss.backward()
 
-        ## At the end of the epoch we update the running stats
-        self.VAE_trn_hist.append( self.run_trn_loss[0] / len(self.train_loader) )
-        if self.has_iodis: self.IODIS_trn_hist.append( self.run_trn_acc[0] / len(self.train_loader) )
-        if self.has_lzdis: self.LZDIS_trn_hist.append( self.run_trn_acc[1] / len(self.train_loader) )
+            ## Clipping on the absolute value of the gradients
+            if self.clip_grad > 0:
+                nn.utils.clip_grad_value_(self.cluster.parameters(), self.clip_grad)
+            self.optimiser.step()
+
+            ## We update the running losses for plotting
+            running_loss += np.array([ AE_loss.item(), KLD_loss.item(), LSD_loss.item(), IOD_loss.item() ])
+
+        ## At the end of the epoch we update the stats
+        self.AE_trn_hist.append( running_loss[0] / len(self.train_loader) )
+        if self.has_KLD: self.KLD_trn_hist.append( running_loss[1] / len(self.train_loader) )
+        if self.has_LSD: self.LSD_trn_hist.append( running_loss[2] / len(self.train_loader) )
+        if self.has_IOD: self.IOD_trn_hist.append( running_loss[3] / len(self.train_loader) )
 
         ## The epoch counter is incremented
         self.epochs_trained += 1
@@ -310,38 +262,47 @@ class BIB_AE(object):
             It is basically the same as the train functin above but without the gradient desc
         """
         with T.no_grad():
-            self.change_mode( "eval" )
-            self.run_tst_loss = np.zeros(4)
-            self.run_tst_acc = np.zeros(2)
+            self.cluster.eval()
+            running_loss = np.zeros(4)
 
-            for (data, targets) in tqdm(self.test_loader, desc="Testing ", ncols=80, unit=""):
+            for (data, classes) in tqdm(self.test_loader, desc="Testing ", ncols=80, unit=""):
 
                 data = self.prepare_data(data)
-                cond_info = self.prepare_conditional(targets)
-                rec_loss, kld_loss = self.vae_step(data, cond_info, train=False)
-                self.run_tst_loss[0] += rec_loss
-                self.run_tst_loss[1] += kld_loss
+                cond_info = self.prepare_conditional(classes)
 
-                if self.epochs_trained<self.burn_in:
-                    continue
+                (recons, z_values, z_means, z_log_stds,
+                         LSD_real, LSD_fake, IOD_real, IOD_fake) = self.cluster(data, cond_info, self.train_LSD, self.train_IOD)
 
-                if self.has_iodis:
-                    iod_acc, iod_loss = self.iodis_step(data, cond_info, train=False)
-                    self.run_tst_loss[2] += iod_loss
-                    self.run_tst_acc[0] += iod_acc
+                KLD_loss = T.tensor(0.0)
+                LSD_loss = T.tensor(0.0)
+                IOD_loss = T.tensor(0.0)
+                if (self.train_LSD or self.train_IOD):
+                    ones  = T.ones(  [len(recons),1], dtype=T.float32, device=self.cluster.device)
+                    zeros = T.zeros( [len(recons),1], dtype=T.float32, device=self.cluster.device)
 
-                if self.has_lzdis:
-                    lzd_acc, lzd_loss = self.lzdis_step(data, cond_info, train=False)
-                    self.run_tst_loss[3] += lzd_loss
-                    self.run_tst_acc[1] += lzd_acc
+                AE_loss = self.AE_loss_fn( recons, data )
+                if self.has_KLD:   KLD_loss = 0.5 * T.mean( z_means*z_means + (2*z_log_stds).exp() - 2*z_log_stds - 1 )
+                if self.train_LSD: LSD_loss = 0.5 * ( self.LSD_loss_fn( LSD_real, ones) + self.LSD_loss_fn( LSD_fake, zeros) )
+                if self.train_IOD: IOD_loss = 0.5 * ( self.IOD_loss_fn( IOD_real, ones) + self.IOD_loss_fn( IOD_fake, zeros) )
 
-            self.VAE_tst_hist.append( self.run_tst_loss[0] / len(self.test_loader) )
-            if self.has_iodis: self.IODIS_tst_hist.append( self.run_tst_acc[0] / len(self.test_loader) )
-            if self.has_lzdis: self.LZDIS_tst_hist.append( self.run_tst_acc[1] / len(self.test_loader) )
+                running_loss += np.array([ AE_loss.item(), KLD_loss.item(), LSD_loss.item(), IOD_loss.item() ])
+
+            ## At the end of the epoch we update the stats
+            self.AE_tst_hist.append( running_loss[0] / len(self.test_loader) )
+            if self.has_KLD: self.KLD_tst_hist.append( running_loss[1] / len(self.test_loader) )
+            if self.has_LSD: self.LSD_tst_hist.append( running_loss[2] / len(self.test_loader) )
+            if self.has_IOD: self.IOD_tst_hist.append( running_loss[3] / len(self.test_loader) )
 
             ## We also update the information used for visualisation based on the last batch
-            self.latent_means = self.VAE_Net( data, cond_info )[2].cpu()
-            self.latent_targets = targets
+            self.latent_values  = z_means.cpu() if self.has_KLD else z_values.cpu()
+            self.latent_classes = classes
+
+    def update_cyclical(self):
+        if self.cyclical is None:
+            return 0
+
+        ratio = self.epochs_trained / self.cyclical[1]
+        self.KLD_weight = self.cyclical[0] * np.clip( 2*(ratio%1), 0, 1 )
 
     def visualise_recreation(self):
         """ This function returns reconstructions of 4 selected examples and is called
@@ -349,9 +310,9 @@ class BIB_AE(object):
         """
         with T.no_grad():
             data = self.prepare_data( self.vis_data )
-            cond_info = self.prepare_conditional(self.vis_targets)
-            reconstructions, *_ = self.VAE_Net(data, cond_info)
-            return reconstructions.view(self.vis_data.shape).cpu()
+            cond_info = self.prepare_conditional(self.vis_classes)
+            recons, *_ = self.cluster.AE_net(data, cond_info)
+            return recons.view(self.vis_data.shape).cpu()
 
     def run_training_loop( self, load_flag, vis_z, dim_red ):
         """ This is the main training loop
@@ -363,19 +324,23 @@ class BIB_AE(object):
             self.load_models( load_flag )
 
         ## Creating the plots for the visualisation
-        rp = myPL.recreation_plot( self.vis_data, self.name )
+        rp = myPL.recreation_plot( self.vis_data, self.name, self.unorm_trans )
         if vis_z>0:
             zp = myPL.latent_plot( self.name, dim_red )
 
         ## Creating the loss/accuracy plots
-        vae_loss_plot = myPL.loss_plot( self.VAE_Net.name )
-        all_loss_plot = myPL.loss_contribution_plot( self.VAE_Net.name )
-        if self.has_iodis: iodis_loss_plot = myPL.loss_plot( self.IODIS_Net.name )
-        if self.has_lzdis: lzdis_loss_plot = myPL.loss_plot( self.LZDIS_Net.name )
+        AE_loss_plot = myPL.loss_plot( self.cluster.AE_net.name )
+        if self.has_KLD: KLD_loss_plot = myPL.loss_plot( self.cluster.AE_net.name+"_KLD" )
+        if self.has_LSD: LSD_loss_plot = myPL.loss_plot( self.cluster.LSD_net.name )
+        if self.has_IOD: IOD_loss_plot = myPL.loss_plot( self.cluster.IOD_net.name )
 
         ## We run the training loop indefinetly
         for epoch in count(1):
             print( "\nEpoch: {}".format(epoch) )
+
+            ## We run some checks on the network configuration
+            self.set_discrinimator_flags()
+            self.update_cyclical()
 
             ## Run the test/train cycle
             self.testing_epoch()
@@ -384,21 +349,28 @@ class BIB_AE(object):
             ## Update the visualisation graphs
             rp.update( self.visualise_recreation() )
             if vis_z>0 and epoch%vis_z==0:
-                zp.update( self.latent_targets, self.latent_means )
+                zp.update( self.latent_classes, self.latent_values )
 
-            ## Normalise the runnin loss scores
-            self.run_trn_loss = np.abs(self.run_trn_loss) / self.run_trn_loss[0]
+            ## Printing the KLD weight
+            print( "Annealing Schedule:" )
+            print( " - KLD Weight : ", self.KLD_weight )
+
+            ## Printing the GRL influence
+            print( "Avesary Impact:" )
+            print( " - GRL Lambda: ", self.cluster.GRLambda )
+
+            ## Print out the loss scores
             print( "Loss Contributions: ")
-            print(" - Rec: ", self.run_trn_loss[0] )
-            print(" - KLD: ", self.run_trn_loss[1] )
-            if self.has_iodis: print(" - IOD: ", self.run_trn_loss[2] )
-            if self.has_lzdis: print(" - LZD: ", self.run_trn_loss[3] )
+            print(" - Rec: ", self.AE_trn_hist[-1] )
+            if self.has_KLD: print(" - KLD: ", self.KLD_weight * self.KLD_trn_hist[-1] )
+            if self.has_LSD: print(" - LSD: ", self.LSD_weight * self.LSD_trn_hist[-1] )
+            if self.has_IOD: print(" - IOD: ", self.IOD_weight * self.IOD_trn_hist[-1] )
 
             ## Update the loss/accuracy plots
-            vae_loss_plot.update( self.VAE_tst_hist, self.VAE_trn_hist )
-            all_loss_plot.update( self.run_trn_loss )
-            if self.has_iodis: iodis_loss_plot.update( self.IODIS_tst_hist, self.IODIS_trn_hist )
-            if self.has_lzdis: lzdis_loss_plot.update( self.LZDIS_tst_hist, self.LZDIS_trn_hist )
+            AE_loss_plot.update( self.AE_trn_hist, self.AE_tst_hist )
+            if self.has_KLD: KLD_loss_plot.update( self.KLD_trn_hist, self.KLD_tst_hist )
+            if self.has_LSD: LSD_loss_plot.update( self.LSD_trn_hist, self.LSD_tst_hist )
+            if self.has_IOD: IOD_loss_plot.update( self.IOD_trn_hist, self.IOD_tst_hist )
 
             ## We save the latest version of the networks
             self.save_models("latest")

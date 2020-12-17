@@ -4,6 +4,7 @@ sys.path.append(home_env)
 
 from Resources import Plotting as myPL
 
+import numpy as np
 import matplotlib.pyplot as plt
 
 from itertools import count
@@ -12,6 +13,46 @@ from collections import OrderedDict
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
+
+def get_random_samples( shape, flag ):
+    if flag == "gauss":
+        return T.randn( shape )
+
+    if flag == "disk":
+        theta = 2*np.pi*T.rand(shape[0])
+        length = T.sqrt(T.rand(shape[0]))
+        x, y = length * T.cos(theta), length * T.sin(theta)
+        return T.cat( (x.unsqueeze(1), y.unsqueeze(1)), 1 )
+
+    if flag == "square":
+        return 2 * T.rand( shape ) - 1
+
+    if flag == "star10":
+        theta = 2*np.pi*T.rand(shape[0])
+        length = T.sqrt(T.rand(shape[0]))
+        x, y = length * T.cos(theta), length * T.sin(theta)
+
+        ctheta = T.randint(0, 10, (shape[0],)) * np.pi / 5
+        clen = 0.5 * T.rand(shape[0]) + 0.5
+        cx, cy = clen * T.cos(ctheta), clen * T.sin(ctheta)
+
+        tx = x * np.pi/20 + cx
+        ty = y * np.pi/20 + cy
+
+        return T.cat( (tx.unsqueeze(1), ty.unsqueeze(1)), 1 )
+
+
+
+
+
+
+
+def calc_grad_norm(model):
+    total_norm = 0
+    for p in model.parameters():
+        param_norm = T.linalg.norm(grad.data, ord=2)
+        total_norm += param_norm.item()*param_norm.item()
+    return np.sqrt(total_norm)
 
 def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
                        act_h=nn.ReLU(), act_o=None, drpt=0, lnrm=False,
@@ -41,7 +82,7 @@ def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
         layers.append(( "{}_lin_{}".format(name, l), nn.Linear(widths[l-1], widths[l]) ))
         layers.append(( "{}_act_{}".format(name, l), act_h ))
         if drpt>0:
-            layers.append(( "{}_drp_{}".format(name, l), nn.Dropout() ))
+            layers.append(( "{}_drp_{}".format(name, l), nn.Dropout(p=drpt) ))
         if lnrm:
             layers.append(( "{}_nrm_{}".format(name, l), nn.LayerNorm(widths[l]) ))
 
@@ -75,7 +116,7 @@ def cnn_creator( name, data_chnls, cnn_layers, act, brnm, tpose = False ):
 
         layers.append(( "{}_conv2d_{}".format(name, l), conv_type( in_channels=in_ch, out_channels=out_ch,
                                                                    kernel_size=k, stride=s, padding=p ) ))
-        if not tpose or l<d-1:
+        if not tpose or l<d:
             if brnm:
                 layers.append(( "{}_bnm_{}".format(name, l+1), nn.BatchNorm2d(out_ch) ))
             layers.append(( "{}_act_{}".format(name, l+1), act ))
