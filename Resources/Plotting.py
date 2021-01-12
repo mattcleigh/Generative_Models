@@ -36,16 +36,17 @@ class loss_plot(object):
         self.ax  = self.fig.add_subplot(111)
         self.fig.suptitle(title)
 
-        self.trn_line, = self.ax.plot( [], "-r" )
-        self.tst_line, = self.ax.plot( [], "-g" )
+        self.trn_line, = self.ax.plot( [], "-r", label="Train" )
+        self.tst_line, = self.ax.plot( [], "-g", label="Test" )
 
     def update(self, trnl, tstl):
 
-        self.trn_line.set_data( np.arange(len(trnl)), np.clip(trnl,0,10) )
-        self.tst_line.set_data( np.arange(len(tstl)), np.clip(tstl,0,10) )
+        self.trn_line.set_data( np.arange(len(trnl)), np.clip(trnl,-100,100) )
+        self.tst_line.set_data( np.arange(len(tstl)), np.clip(tstl,-100,100) )
 
         self.ax.relim()
         self.ax.autoscale_view()
+        self.ax.legend()
 
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
@@ -56,7 +57,7 @@ def trans(tensor, unorm_trans=None, make_image=True):
         tensor = unorm_trans(tensor)
 
     tensor = T.clamp(tensor, 0, 1 )
-    
+
     if make_image:
         topil = TV.transforms.ToPILImage()
         tensor = topil(tensor)
@@ -108,16 +109,19 @@ class latent_plot(object):
         elif dim_red == "PCA":  self.dim_red = PCA(n_components=2)
         elif dim_red == "None": self.dim_red = None
 
-    def update(self, targets, means):
+    def update(self, targets, values):
 
-        if means.shape[1] > 2:
+        if values.shape[1] > 2:
             if self.dim_red is None:
                 print( "Cant visualise latent space without dimensionality reduction method specified!")
                 return 0
-            means = self.dim_red.fit_transform(means)
+            values = self.dim_red.fit_transform(values)
 
-        self.scatter.set_offsets( means )
-        self.scatter.set_array( targets )
+        self.scatter.set_offsets( values )
+        if len(targets.shape)==1:
+            self.scatter.set_array( targets )
+        else:
+            self.scatter.set_array( np.ones(len(values)) )
 
         self.ax.ignore_existing_data_limits = True
         self.ax.update_datalim(self.scatter.get_datalim(self.ax.transData))

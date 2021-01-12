@@ -2,7 +2,9 @@ import sys
 home_env = '../'
 sys.path.append(home_env)
 
-from Resources import Utils as myUT
+from Resources import Utils  as myUT
+from Resources import Layers as myLY
+from Resources import Loss   as myLS
 
 import os
 import math
@@ -23,7 +25,7 @@ class AE_Network(nn.Module):
     def __init__( self, name, var, do_cnn,
                   x_dims, z_dims, c_dims, clamp_out,
                   act, mlp_layers, cnn_layers,
-                  drpt, lnrm, bnrm ):
+                  drpt, lnrm, pnrm ):
         super(AE_Network, self).__init__()
 
         ## Defining the network features
@@ -34,17 +36,17 @@ class AE_Network(nn.Module):
         mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
         ## Defining the CNN and mlp encoder network
-        if self.do_cnn: self.cnv_enc = myUT.cnn_creator( "cnv_encoder", x_dims[0], cnn_layers, act, bnrm )
-        self.mlp_enc = myUT.mlp_creator( "mlp_encoder", n_in=mlp_dim+c_dims, n_out=(1+var)*z_dims,
+        if self.do_cnn: self.cnv_enc = myLY.cnn_creator( "cnv_encoder", x_dims[0], cnn_layers, act, pnrm )
+        self.mlp_enc = myLY.mlp_creator( "mlp_encoder", n_in=mlp_dim+c_dims, n_out=(1+var)*z_dims,
                                          custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
 
         ## Reversing the layer structure so that the network is symmetrical
         mlp_layers.reverse(), cnn_layers.reverse()
 
         ## Defining the MLP and t-CNN decoder network
-        self.mlp_dec = myUT.mlp_creator( "mlp_decoder", n_in=z_dims+c_dims, n_out=mlp_dim,
+        self.mlp_dec = myLY.mlp_creator( "mlp_decoder", n_in=z_dims+c_dims, n_out=mlp_dim,
                                          custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
-        if self.do_cnn: self.cnv_dec = myUT.cnn_creator( "cnv_decoder", x_dims[0], cnn_layers, act, bnrm, tpose=True )
+        if self.do_cnn: self.cnv_dec = myLY.cnn_creator( "cnv_decoder", x_dims[0], cnn_layers, act, pnrm, upscl=True )
 
         ## Moving the network to the device
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
@@ -78,7 +80,7 @@ class AE_Network(nn.Module):
             ## We return the latent space sample and the stats of the distribution
             return z_values, z_means, z_log_stds
 
-        return z_outs, None, None
+        return z_outs, z_outs, None
 
     def decode(self, z, c_info=None):
         ## We add in our conditional information if specified
@@ -108,10 +110,10 @@ class AE_Network(nn.Module):
         return recons, z_values, z_means, z_log_stds
 
     def save_checkpoint(self, flag=""):
-        T.save(self.state_dict(), self.full_nm+"_"+flag)
+        T.save(self.state_dict(), self.name+"_"+flag)
 
     def load_checkpoint(self, flag=""):
-        self.load_state_dict(T.load(self.full_nm+"_"+flag))
+        self.load_state_dict(T.load(self.name+"_"+flag))
 
 class DIS_Network(nn.Module):
     """ A discriminator neural network for a GAN setup.
@@ -120,7 +122,7 @@ class DIS_Network(nn.Module):
     def __init__( self, name, do_cnn,
                   x_dims, c_dims,
                   act, mlp_layers, cnn_layers,
-                  drpt, lnrm, brnm ):
+                  drpt, lnrm, pnrm ):
         super(DIS_Network, self).__init__()
 
         ## Defining the network features
@@ -130,8 +132,8 @@ class DIS_Network(nn.Module):
         mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
         ## Defining the network structure
-        if self.do_cnn: self.cnv_net = myUT.cnn_creator( "cnv_net", x_dims[0], cnn_layers, act, brnm )
-        self.mlp_net = myUT.mlp_creator( "mlp_net", n_in=mlp_dim+c_dims, n_out=1, custom_size=mlp_layers,
+        if self.do_cnn: self.cnv_net = myLY.cnn_creator( "cnv_net", x_dims[0], cnn_layers, act, pnrm )
+        self.mlp_net = myLY.mlp_creator( "mlp_net", n_in=mlp_dim+c_dims, n_out=1, custom_size=mlp_layers,
                                          act_h=act, drpt=drpt, lnrm=lnrm )
 
         ## Moving the network to the device
@@ -164,91 +166,69 @@ class DIS_Network(nn.Module):
     def load_checkpoint(self, flag=""):
         self.load_state_dict(T.load(self.name+"_"+flag))
 
-class BIBAE_Cluster(nn.Module):
+class BIBAE_Network(nn.Module):
     """ A cluster of a deterministic AE, with two adversaries. The IO and the LS discriminator. Both are optional and
         without them this is just reduced to a simple autoencoder.
     """
 
     def __init__( self, name ):
-        super(BIBAE_Cluster, self).__init__()
+        super(BIBAE_Network, self).__init__()
         self.__dict__.update(locals())
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
-        self.GRLambda = 0.0
 
     def setup_AE( self, *args):
         self.AE_net = AE_Network(*args)
 
-    def setup_LSD( self, GRLambda, *args):
-        self.LSD_lambda = GRLambda
+    def setup_LSD( self, GRLambda, loss_type, flag, *args):
+        self.LSD_GRL = myLY.GRL(GRLambda)
+        self.LSD_loss_type = loss_type
         self.LSD_net = DIS_Network(*args)
+        self.LSD_flag = flag
 
-    def setup_IOD( self, GRLambda, *args):
-        self.IOD_lambda = GRLambda
+    def setup_IOD( self, GRLambda, loss_type, *args):
+        self.IOD_GRL = myLY.GRL(GRLambda)
+        self.IOD_loss_type = loss_type
         self.IOD_net = DIS_Network(*args)
+
+    def rename(self, new_name):
+        self.name = new_name
 
     def forward( self, data, c_info=None, train_LSD=False, train_IOD=False ):
 
-        ## Increasing the effect of the adversaries
-        if self.GRLambda < 1.0 and (train_IOD or train_LSD):
-            self.GRLambda += 1e-2
-        elif self.GRLambda > 1.0:
-            self.GRLambda = 1.0
-
-        ## First we pass the data through the AE network
+        ## First we pass the data through the AE network and get its losses
         recons, z_values, z_means, z_log_stds = self.AE_net(data, c_info )
+        AE_loss = F.mse_loss( recons, data, reduction="mean" )
+        KLD_loss = myLS.KLD_to_Norm_Loss(z_means, z_log_stds ) if self.AE_net.var else T.tensor(0.0)
 
         ## If there is an LSD network then we pass it through after a GRL
-        LSD_real = 0
-        LSD_fake = 0
-        if hasattr(self, "LSD_net") and train_LSD:
-
-            ## Generate numbers in a given pattern
-            n_samples = myUT.get_random_samples( z_values.shape, "disk" ).to(self.device)
-
+        LSD_loss = T.tensor(0.0)
+        if train_LSD:
+            n_samples = myUT.get_random_samples( z_values.shape, self.LSD_flag ).to(self.device)
             LSD_real = self.LSD_net( n_samples, None )
-            LSD_fake = self.LSD_net( GRL(self.GRLambda)(z_values), None )
+            LSD_fake = self.LSD_net( self.LSD_GRL(z_values), None )
+            LSD_loss = myLS.GAN_Loss( self.LSD_loss_type, LSD_real, LSD_fake, n_samples, z_values,
+                                      self.LSD_net, c_info = None )
 
         ## Then if there is an IOD network then we pass it through after a GRL
-        IOD_real = 0
-        IOD_fake = 0
-        if hasattr(self, "IOD_net") and train_IOD:
+        IOD_loss = T.tensor(0.0)
+        if train_IOD:
             IOD_real = self.IOD_net( data, c_info )
-            IOD_fake = self.IOD_net( GRL(self.GRLambda)(recons), c_info )
+            IOD_fake = self.IOD_net( self.IOD_GRL(recons), c_info )
+            IOD_loss = myLS.GAN_Loss( self.IOD_loss_type, IOD_real, IOD_fake, data, recons,
+                                      self.IOD_net, c_info = c_info )
 
         ## The output of all stages are returned
-        return recons, z_values, z_means, z_log_stds, LSD_real, LSD_fake, IOD_real, IOD_fake
+        return recons, z_means, AE_loss, KLD_loss, LSD_loss, IOD_loss
 
     def save_checkpoint(self, flag=""):
-        T.save(self.state_dict(), self.name+"_"+flag)
+        if not os.path.exists(self.name):
+            os.system("mkdir -p " + self.name)
+
+        self.AE_net.save_checkpoint(flag)
+        if hasattr(self, "LSD_net"): self.LSD_net.save_checkpoint(flag)
+        if hasattr(self, "IOD_net"): self.IOD_net.save_checkpoint(flag)
 
     def load_checkpoint(self, flag=""):
-        self.GRLambda = 1.0
-        self.load_state_dict(T.load(self.name+"_"+flag))
-
-class GRF(Function):
-    """
-    Gradient Reversal Layer from:
-    Unsupervised Domain Adaptation by Backpropagation (Ganin & Lempitsky, 2015)
-    Forward pass is the identity function. In the backward pass,
-    the upstream gradients are multiplied by -lambda (i.e. gradient is reversed)
-    """
-
-    @staticmethod
-    def forward(ctx, x, lambda_=1):
-        ctx.lambda_ = lambda_
-        return x.clone()
-
-    @staticmethod
-    def backward(ctx, grads):
-        lambda_ = ctx.lambda_
-        lambda_ = grads.new_tensor(lambda_)
-        dx = -lambda_ * grads
-        return dx, None
-
-class GRL(nn.Module):
-    def __init__(self, lambda_=1):
-        super(GRL, self).__init__()
-        self.lambda_ = lambda_
-
-    def forward(self, x):
-        return GRF.apply(x, self.lambda_)
+        self.AE_net.load_checkpoint(flag)
+        if hasattr(self, "LSD_net"): self.LSD_net.load_checkpoint(flag)
+        if hasattr(self, "IOD_net"): self.IOD_net.load_checkpoint(flag)
