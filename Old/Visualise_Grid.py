@@ -44,7 +44,7 @@ def main():
                                       [32,3,1,2],
                                       [64,3,1,2],
                                       [128,3,1,2] ],
-                       drpt = 0.0, lnrm = False, pnrm = True )
+                       drpt = 0.0, lnrm = False, nrm = True )
 
     ## Initialise the Latent Space Discriminator
     model.initiate_LSD( GRLambda = 1, weight = 1, flag = "disk", loss_type = "BCE",
@@ -61,7 +61,7 @@ def main():
                                        [32,3,1,2],
                                        [32,3,1,2],
                                        [32,3,1,2] ],
-                        drpt = 0.3, lnrm = False, pnrm = False )
+                        drpt = 0.3, lnrm = False, nrm = False )
 
     ## Initialise the model
     model.load_models( "latest" )

@@ -55,12 +55,9 @@ def calc_cnn_out_dim( x_dims, cnn_layers ):
     print("\nChecking Data-CNN-MLP Compatibility:")
     n_in = x_dims[-1]
     print("Input image = {}x{}x{}".format(*x_dims))
-    for l, (c,k,p,res,pl) in enumerate(cnn_layers, 1):
-        if res:
-            print(" --> Res  {} out = {}x{}x{}".format(l,c,int(n_in),int(n_in)) )
-        else:
-            n_in = ( n_in + 2*p - k ) / 1 + 1
-            print(" --> Conv {} out = {}x{}x{}".format(l,c,int(n_in),int(n_in)) )
+    for l, (c,k,p,n,pl,res) in enumerate(cnn_layers, 1):
+        n_in = ( n_in + 2*p - k ) / 1 + 1
+        print(" --> Conv {} out = {}x{}x{}".format(l,c,int(n_in),int(n_in)) )
         if pl>0:
             n_in = ( n_in - pl ) / pl + 1
             print(" --> Pool {} out = {}x{}x{}".format(l,c,int(n_in),int(n_in)) )
@@ -76,3 +73,7 @@ def calc_cnn_out_dim( x_dims, cnn_layers ):
 def weight_reset(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
         m.reset_parameters()
+
+def set_requires_grad(module, val):
+    for p in module.parameters():
+        p.requires_grad = val

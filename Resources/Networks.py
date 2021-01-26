@@ -25,7 +25,7 @@ class AE_Network(nn.Module):
     def __init__( self, name, var, do_cnn,
                   x_dims, z_dims, c_dims, clamp_out,
                   act, mlp_layers, cnn_layers,
-                  drpt, lnrm, pnrm ):
+                  drpt, lnrm, nrm ):
         super(AE_Network, self).__init__()
 
         ## Defining the network features
@@ -36,7 +36,7 @@ class AE_Network(nn.Module):
         mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
         ## Defining the CNN and mlp encoder network
-        if self.do_cnn: self.cnv_enc = myLY.cnn_creator( "cnv_encoder", x_dims[0], cnn_layers, act, pnrm )
+        if self.do_cnn: self.cnv_enc, data_shape = myLY.cnn_creator( "cnv_encoder", x_dims, cnn_layers, act, nrm, False, x_chnls=x_dims[0] )
         self.mlp_enc = myLY.mlp_creator( "mlp_encoder", n_in=mlp_dim+c_dims, n_out=(1+var)*z_dims,
                                          custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
 
@@ -46,15 +46,15 @@ class AE_Network(nn.Module):
         ## Defining the MLP and t-CNN decoder network
         self.mlp_dec = myLY.mlp_creator( "mlp_decoder", n_in=z_dims+c_dims, n_out=mlp_dim,
                                          custom_size=mlp_layers, act_h=act, drpt=drpt, lnrm=lnrm )
-        if self.do_cnn: self.cnv_dec = myLY.cnn_creator( "cnv_decoder", x_dims[0], cnn_layers, act, pnrm, upscl=True )
+        if self.do_cnn: self.cnv_dec, data_shape = myLY.cnn_creator( "cnv_decoder", data_shape, cnn_layers, act, nrm, True, x_chnls=x_dims[0] )
 
         ## Moving the network to the device
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
-        print("\n\nNetwork structure: {}".format(self.name))
+        print("\nNetwork structure: {}".format(self.name))
         print(self)
-        print("\n")
+        print()
 
     def encode(self, data, c_info=None):
         ## The information is passed through the encoding conv net if need be and then flattened
@@ -122,7 +122,7 @@ class DIS_Network(nn.Module):
     def __init__( self, name, do_cnn,
                   x_dims, c_dims,
                   act, mlp_layers, cnn_layers,
-                  drpt, lnrm, pnrm ):
+                  drpt, lnrm, nrm ):
         super(DIS_Network, self).__init__()
 
         ## Defining the network features
@@ -132,7 +132,7 @@ class DIS_Network(nn.Module):
         mlp_dim = myUT.calc_cnn_out_dim( x_dims, cnn_layers ) if self.do_cnn else x_dims[0]
 
         ## Defining the network structure
-        if self.do_cnn: self.cnv_net = myLY.cnn_creator( "cnv_net", x_dims[0], cnn_layers, act, pnrm )
+        if self.do_cnn: self.cnv_net, _ = myLY.cnn_creator( "cnv_net", x_dims, cnn_layers, act, nrm, False )
         self.mlp_net = myLY.mlp_creator( "mlp_net", n_in=mlp_dim+c_dims, n_out=1, custom_size=mlp_layers,
                                          act_h=act, drpt=drpt, lnrm=lnrm )
 
@@ -140,9 +140,9 @@ class DIS_Network(nn.Module):
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
-        print("\n\nNetwork structure: {}".format(self.name))
+        print("\nNetwork structure: {}".format(self.name))
         print(self)
-        print("\n")
+        print()
 
     def forward(self, input, c_info=None):
 
@@ -179,16 +179,14 @@ class BIBAE_Network(nn.Module):
     def setup_AE( self, *args):
         self.AE_net = AE_Network(*args)
 
-    def setup_LSD( self, GRLambda, loss_type, flag, *args):
-        self.LSD_GRL = myLY.GRL(GRLambda)
-        self.LSD_loss_type = loss_type
-        self.LSD_net = DIS_Network(*args)
-        self.LSD_flag = flag
+    def setup_LSD( self, GRLambda, loss_type, shape, *args):
+        self.LSD_net  = DIS_Network(*args)
+        self.LSD_loss = myLS.GAN_Loss( self.LSD_net, type=loss_type, grl=GRLambda )
+        self.dist_shape = shape
 
     def setup_IOD( self, GRLambda, loss_type, *args):
-        self.IOD_GRL = myLY.GRL(GRLambda)
-        self.IOD_loss_type = loss_type
-        self.IOD_net = DIS_Network(*args)
+        self.IOD_net  = DIS_Network(*args)
+        self.IOD_loss = myLS.GAN_Loss( self.IOD_net, type=loss_type, grl=GRLambda )
 
     def rename(self, new_name):
         self.name = new_name
@@ -203,19 +201,13 @@ class BIBAE_Network(nn.Module):
         ## If there is an LSD network then we pass it through after a GRL
         LSD_loss = T.tensor(0.0)
         if train_LSD:
-            n_samples = myUT.get_random_samples( z_values.shape, self.LSD_flag ).to(self.device)
-            LSD_real = self.LSD_net( n_samples, None )
-            LSD_fake = self.LSD_net( self.LSD_GRL(z_values), None )
-            LSD_loss = myLS.GAN_Loss( self.LSD_loss_type, LSD_real, LSD_fake, n_samples, z_values,
-                                      self.LSD_net, c_info = None )
+            n_samples = myUT.get_random_samples( z_values.shape, self.dist_shape ).to(self.device)
+            LSD_loss = self.LSD_loss( n_samples, z_values, c_info=None )
 
         ## Then if there is an IOD network then we pass it through after a GRL
         IOD_loss = T.tensor(0.0)
         if train_IOD:
-            IOD_real = self.IOD_net( data, c_info )
-            IOD_fake = self.IOD_net( self.IOD_GRL(recons), c_info )
-            IOD_loss = myLS.GAN_Loss( self.IOD_loss_type, IOD_real, IOD_fake, data, recons,
-                                      self.IOD_net, c_info = c_info )
+            IOD_loss = self.IOD_loss( data, recons, c_info=c_info )
 
         ## The output of all stages are returned
         return recons, z_means, AE_loss, KLD_loss, LSD_loss, IOD_loss

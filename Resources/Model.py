@@ -27,12 +27,12 @@ class BIBAE_Agent(object):
         self.name = os.path.join( save_dir, name )
         self.bibae_net = myNN.BIBAE_Network( self.name+"_BIBAE" )
 
-        self.has_KLD    = False
-        self.has_LSD    = False
-        self.has_IOD    = False
+        self.has_KLD = False
+        self.has_LSD = False
+        self.has_IOD = False
 
-        self.train_LSD  = False
-        self.train_IOD  = False
+        self.train_LSD = False
+        self.train_IOD = False
 
         self.KLD_weight = 0
         self.LSD_weight = 0
@@ -84,7 +84,7 @@ class BIBAE_Agent(object):
     def initiate_AE( self, variational, KLD_weight, cyclical,
                      latent_dims, use_cond,
                      act, mlp_layers, cnn_layers,
-                     drpt, lnrm, pnrm ):
+                     drpt, lnrm, nrm ):
         """ This initialises the autoencoder
         """
 
@@ -100,9 +100,9 @@ class BIBAE_Agent(object):
         self.bibae_net.setup_AE( self.name+"/AE", variational, self.do_cnn,
                                self.data_dims, self.latent_dims, c_dims, self.clamped,
                                act, mlp_layers, cnn_layers,
-                               drpt, lnrm, pnrm )
+                               drpt, lnrm, nrm )
 
-    def initiate_LSD( self, on_at, kill_KLD, GRLambda, weight, flag, loss_type,
+    def initiate_LSD( self, on_at, kill_KLD, GRLambda, weight, shape, loss_type,
                       act, mlp_layers, drpt, lnrm ):
         """ Give the cluster an adversarial network for the latent space.
         """
@@ -115,13 +115,13 @@ class BIBAE_Agent(object):
         self.LSD_weight = weight
 
         ## The Discriminator network
-        self.bibae_net.setup_LSD( GRLambda, loss_type, flag, self.name+"/LSD", False,
+        self.bibae_net.setup_LSD( GRLambda, loss_type, shape, self.name+"/LSD", False,
                                 [self.latent_dims], 0,
                                 act, mlp_layers, [], drpt, lnrm, False )
 
     def initiate_IOD( self, on_at, GRLambda, weight, loss_type, use_cond,
                       act, mlp_layers, cnn_layers,
-                      drpt, lnrm, pnrm ):
+                      drpt, lnrm, nrm ):
         """ Give the cluster both an adversarial discriminator network for the input and output.
         """
 
@@ -137,7 +137,7 @@ class BIBAE_Agent(object):
         self.bibae_net.setup_IOD( GRLambda, loss_type, self.name+"/IOD",
                                   self.do_cnn, self.data_dims, c_dims,
                                   act, mlp_layers, cnn_layers,
-                                  drpt, lnrm, pnrm )
+                                  drpt, lnrm, nrm )
 
     def setup_training(self, load_flag, lr, change_lr, clip_grad ):
         """ A function which sets up some variables used in training, including
@@ -196,9 +196,13 @@ class BIBAE_Agent(object):
                 change = True
 
         if change:
-            print("Reducing ADAM beta to 0 and chaning to new learning rate")
             self.optimiser.param_groups[0]["betas"] = (0,0.99)
             self.optimiser.param_groups[0]["lr"] = self.change_lr
+            print("Reducing ADAM betas to {} and changing learning rate to {}".format(
+                                    self.optimiser.param_groups[0]["betas"],
+                                    self.optimiser.param_groups[0]["lr"]
+                                    )
+            )
 
 
     def training_epoch(self, show_every = 0):

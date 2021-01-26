@@ -67,7 +67,6 @@ def trans(tensor, unorm_trans=None, make_image=True):
 
 class recreation_plot(object):
     def __init__(self, examples, title = "", unorm_trans=None):
-
         self.n = len(examples)
         self.unorm_trans = unorm_trans
 
@@ -93,6 +92,7 @@ class recreation_plot(object):
             img.set_data(trans(ex_out, self.unorm_trans))
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
 
 
 class latent_plot(object):

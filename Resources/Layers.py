@@ -26,21 +26,86 @@ class PixelNorm(nn.Module):
 
         return x * tmp1
 
-class res_cnn_block(nn.Module):
-    def __init__(self, id, depth, chnls, kern, pad, act, pnrm, conv_layer):
-        super(res_cnn_block, self).__init__()
+class conv_block(nn.Module):
+    def __init__(self, data_shape, depth, c_out, kern, pad, act, nrm, pool, upscl):
+        super(conv_block, self).__init__()
 
+        ## The list the contains the sequence of operations
         layers = []
+
+        ## Upscaling and start of block
+        if upscl and pool>0:
+            layers.append( nn.Upsample(scale_factor=pool, mode="nearest" ) )
+
+        ## The convolutional layers with activations and normalisation
         for d in range(1,depth+1):
-            layers.append(( "res_{}_conv_{}".format(id,d), conv_layer( in_channels=chnls, out_channels=chnls,
-                                                                       kernel_size=kern, stride=1, padding=pad ) ))
-            layers.append(( "res_{}_actv_{}".format(id,d+1), act ))
-            if pnrm: layers.append(( "res_{}_pnrm_{}".format(id,d+1), PixelNorm() ))
+            c_in = data_shape[0] if d==1 else c_out
+            layers.append( nn.Conv2d( in_channels=c_in, out_channels=c_out,
+                                      kernel_size=kern, stride=1, padding=pad ) )
+            if act is not None: layers.append( act )
+            if nrm: layers.append( PixelNorm() )
+            # if nrm and not upscl: layers.append( nn.InstanceNorm2d(c_out) )
 
-        self.layers = nn.Sequential(OrderedDict(layers))
+        ## Downscaling at end of block
+        if not upscl and pool>0:
+            layers.append( nn.AvgPool2d( kernel_size=pool, stride=pool ) )
 
-    def forward(self, data):
-        return self.layers(data) + data
+        self.block = nn.Sequential(*layers)
+
+        ## Save the excpected input and the output shapes of the block
+        self.input_shape = data_shape
+        with T.no_grad():
+            self.output_shape = list( self.block( T.ones( size=[1]+self.input_shape) ).shape[1:] )
+
+    def forward(self, input):
+        return self.block(input)
+
+class res_block(conv_block):
+    def __init__(self, *args):
+        super(res_block, self).__init__(*args)
+
+        ## Create the residual path CNN
+        c_in  = self.input_shape[0]
+        c_out = self.output_shape[0]
+        self.fmap_change = nn.Conv2d( c_in, c_out, 1 ) if c_in != c_out else nn.Identity()
+
+    def forward(self, input):
+        layer_out = self.block(input)
+        skip = F.interpolate(input, size=layer_out.shape[2:], mode="bilinear", align_corners=False) ## mode="nearest", align_corners=False)
+        skip = self.fmap_change(skip)
+        return (layer_out + skip) / np.sqrt(2)
+
+class skip_block(conv_block):
+    def __init__(self, *args, toRBGout = [], do_hidden=False):
+        super(skip_block, self).__init__(*args)
+
+        ## Create the to RBG layer CNN
+        c_in = self.output_shape[0]
+        self.to_rgb = nn.Conv2d( c_in, toRBGout, 1 ) if do_hidden else nn.Identity()
+        self.do_hidden = do_hidden
+
+    def forward(self, input):
+
+        ## Work out what inputs are available
+        if type(input) is tuple:
+            old_img, old_hidden = input
+        else:
+            old_hidden = input
+            old_img = None
+
+        ## Get the block outputs
+        new_hidden = self.block(old_hidden)
+        new_img = self.to_rgb(new_hidden)
+
+        ## Add the old image if present
+        if old_img is not None:
+            new_img += F.interpolate(old_img, size=new_img.shape[2:], mode="nearest" )
+
+        ## Return the results
+        if self.do_hidden:
+            return new_img, new_hidden
+        else:
+            return new_img
 
 def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
                        act_h=nn.ReLU(), act_o=None, drpt=0, lnrm=False,
@@ -69,19 +134,25 @@ def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
 
     ## Creating the "hidden" layers in the stream
     for l in range(1, d+1):
-        layers.append(( "{}_lin_{}".format(name, l), lin_layer(widths[l-1], widths[l]) ))
-        layers.append(( "{}_act_{}".format(name, l), act_h ))
-        if drpt>0:
-            layers.append(( "{}_drp_{}".format(name, l), nn.Dropout(p=drpt) ))
-        if lnrm:
-            layers.append(( "{}_nrm_{}".format(name, l), nn.LayerNorm(widths[l]) ))
+        block = []
+
+        block.append( lin_layer(widths[l-1], widths[l]) )
+        block.append( act_h )
+        if drpt>0: block.append( nn.Dropout(p=drpt) )
+        if lnrm:   block.append( nn.LayerNorm(widths[l]) )
+
+        block_nn = nn.Sequential(*block)
+        layers.append(("dense_block_{}".format(l), block_nn))
 
     ## Creating the "output" layer of the stream if applicable which is sometimes
     ## Not the case when creating base streams in larger arcitectures
     if n_out is not None:
-        layers.append(( "{}_lin_out".format(name), lin_layer(widths[-1], n_out) ))
+        block = []
+        block.append( lin_layer(widths[-1], n_out) )
         if act_o is not None:
-            layers.append(( "{}_act_out".format(name), act_o ))
+            block.append( act_o )
+        block_nn = nn.Sequential(*block)
+        layers.append(("dense_block_out", block_nn))
 
     ## Return the list of features or...
     if return_list:
@@ -90,55 +161,45 @@ def mlp_creator( name, n_in=1, n_out=None, d=1, w=256,
     ## ... convert the list to an nn, then return
     return nn.Sequential(OrderedDict(layers))
 
-def cnn_creator( name, data_chnls, cnn_layers, act, pnrm, upscl=False, equal=False ):
-    ## CNN layers are specified in order: C,K,S,P
+def cnn_creator( name, data_shape, cnn_layers, act, nrm, upscl, x_chnls=None ):
+    ## CNN layers are specified in order:
+    ## channel, kernel, padding, depth, pooling, residual
 
     ## We want to ignore one of datapoints, either first or last
     d = len(cnn_layers)
     layers = []
 
-    conv_layer = EqualizedConv2d if equal else nn.Conv2d
+    for l, (c,k,p,n,pl,res) in enumerate(cnn_layers):
+        block = []
 
-    for l, (c,k,p,res,pl) in enumerate(cnn_layers):
-        if upscl: l = l + 1
-        ## Working out how the channels mesh
-        in_ch  = data_chnls if (not upscl and l==0) else cnn_layers[l-1][0]
-        out_ch = data_chnls if (upscl and l==d)     else cnn_layers[l][0]
+        ## Calculate the desired number of output chanels
+        out_ch = x_chnls if (upscl and l==d-1) else cnn_layers[l+upscl][0]
 
-        ## If upscaling the first thing we do is a nearest neighbour resize
-        if upscl and pl>0:
-            layers.append(( "{}_upsm_{}".format(name, l), nn.Upsample(scale_factor=pl, mode='nearest') ))
+        ## Dont put an act, norm, in the first(last) layer of an encoding(decoding) network
+        flag = (not upscl and l!=0) or (upscl and l!=d-1)
+        do_nrm  = nrm if flag else False
+        do_actv = act if flag else None
+        do_hidden = True if flag else False
 
-        ## If it wants a residual block, then we use that instead of a single convolution
-        if res>0:
-            if in_ch != out_ch:
-                print("\n\n\n Warning! Can not change chanel size on residual block! \n\n\n")
-            layers.append(( "{}_res_{}".format(name, l), res_cnn_block(l, res, in_ch, k, p, act, pnrm, conv_layer) ))
+        args = [data_shape, n, out_ch, k, p, do_actv, do_nrm, pl, upscl ]
 
-        ## We add the normal convolution layer
+        ## Use the block creator
+        if res and not upscl:
+            block_nn = res_block( *args )
+        elif res and upscl:
+            block_nn = skip_block( *args, toRBGout=x_chnls, do_hidden=do_hidden )
         else:
-            layers.append(( "{}_conv_{}".format(name, l), conv_layer( in_channels=in_ch, out_channels=out_ch,
-                                                                      kernel_size=k, stride=1, padding=p,
-                                                                      padding_mode="replicate" ) ))
+            block_nn = conv_block( *args )
 
-            ## We dont put an activation or normalisation in the final layer of a upscaling net
-            if upscl and l==d:
-                continue
+        ## We update the shape of the data for the new layer
+        data_shape = block_nn.output_shape
 
-            ## We add the non-linearity
-            layers.append(( "{}_actv_{}".format(name, l+1), act ))
+        ## Add the block to the layer list
+        layers.append(block_nn)
 
-            ## We add the batch normalisation
-            if pnrm:
-               layers.append(( "{}_pnrm_{}".format(name, l+1), PixelNorm() ))
+    layer_nn = nn.Sequential(*layers)
 
-        ## We now add the pooling layer for the conv_net
-        if not upscl and pl>0:
-            layers.append(( "{}_avgp_{}".format(name, l), nn.AvgPool2d( kernel_size=pl, stride=pl ) ))
-
-    layer_nn = nn.Sequential(OrderedDict(layers))
-
-    return layer_nn
+    return layer_nn, data_shape
 
 class GRF(Function):
     """

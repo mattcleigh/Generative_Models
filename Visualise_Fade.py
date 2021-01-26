@@ -20,27 +20,26 @@ def main():
     steps = 50
 
     ## Initialise the model
-    model = Model.BIBAE_Agent( name = "VAE_GAN", save_dir = "Saved_Models" )
+    model = Model.BIBAE_Agent( name = "BIBAE0", save_dir = "Saved_Models" )
 
     ## Load up the dataset
     model.initiate_dataset( dataset_name = "CelebA",
                             data_dims = [3,64,64], flatten_data = False, clamped = False,
                             class_dims = 40, class_onehot = False,
-                            n_workers = 12, batch_size = 128 )
+                            n_workers = 1, batch_size = 64 )
 
     ## Initialise the generative VAE
-    model.initiate_AE( variational = True, KLD_weight = 5e-2, cyclical = None,
+    model.initiate_AE( variational = True, KLD_weight = 1e-2, cyclical = None,
                        latent_dims = 256, use_cond = False,
                        act = nn.LeakyReLU(0.2),
                        mlp_layers = [512],
-                       cnn_layers = [ [16,3,1,0,0], ## Chan,Kern,Pad,Residual,Pool
-                                      [32,3,1,0,2],
-                                      [64,3,1,0,2],
-                                      [128,3,1,0,2],
-                                      [256,3,1,0,2],
-                                      [256,3,1,2,2],
-                                      [256,3,1,2,2] ],
-                       drpt = 0.0, lnrm = False, pnrm = True )
+                       cnn_layers = [ [16,1,0,1,0,1], ## Chan,Kern,Pad,NConv,Pool,Res
+                                      [32,3,1,1,2,1],
+                                      [64,3,1,1,2,1],
+                                      [128,3,1,1,2,1],
+                                      [256,3,1,1,2,1],
+                                      [256,3,1,1,2,1] ],
+                       drpt = 0.0, lnrm = False, nrm = True )
 
     ## Initialise the model
     model.load_models( "latest" )
@@ -53,7 +52,7 @@ def main():
     ax_M = fig.add_subplot(1,3,2)
     ax_D = fig.add_subplot(1,3,3)
 
-    real_D = model.test_loader.dataset[0][0].to(model.bibae_net.device)
+    real_D = model.train_loader.dataset[0][0].to(model.bibae_net.device)
     im_S = ax_S.imshow( myPL.trans(real_D, model.unorm_trans) )
     im_M = ax_M.imshow( myPL.trans(real_D, model.unorm_trans) )
     im_D = ax_D.imshow( myPL.trans(real_D, model.unorm_trans) )
